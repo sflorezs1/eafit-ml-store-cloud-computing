@@ -1,0 +1,147 @@
+# "org" ensures this Service is used with the correct Serverless Framework Access Key.
+org: eafit
+# "service" is the name of this project. This will also be added to your AWS resource names.
+service: ml-store-be
+
+custom:
+  tableName: 'models-table-${sls:stage}'
+  s3BucketName: 'raw-clickstream-sflorezs1-${sls:stage}'
+  s3UserImageBucketName: 'user-images-sflorezs1-${sls:stage}'
+  s3FrontBucketName: 'web-models-sflorezs1-${sls:stage}'
+  executionsTableName: 'executions-table-${sls:stage}'
+  executionQueueName: 'execution-${sls:stage}'
+  resultQueueName: 'result-${sls:stage}'
+
+provider:
+  name: aws
+  region: us-east-1
+  runtime: nodejs20.x
+  httpApi: 
+    cors: true
+  iam:
+    role: arn:aws:iam::626150083436:role/LabRole
+  environment:
+    MODELS_TABLE: ${self:custom.tableName}
+    S3_BUCKET: ${self:custom.s3UserImageBucketName}
+    EXECUTIONS_TABLE: ${self:custom.executionsTableName}
+    GEMINI_API_KEY: ${ssm:/aws/reference/secretsmanager/GeminiApiKey}
+    SQS_EXECUTION_QUEUE_URL: { Ref: ExecutionQueue }
+    SQS_RESULT_QUEUE_URL: { Ref: ResultQueue }
+
+
+functions:
+  api:
+    handler: handler.handler
+    role: arn:aws:iam::626150083436:role/LabRole
+    events:
+      - httpApi: '*'
+
+  handleS3UserImage:
+    handler: executionHandler.handleS3UserImage
+    events:
+      - sqs:
+          arn:
+            Fn::GetAtt:
+              - ExecutionQueue
+              - Arn
+          batchSize: 1
+
+  handleExecutionQueue:
+    handler: executionHandler.handleExecuteModel
+    role: arn:aws:iam::626150083436:role/LabRole
+    events:
+      - sqs:
+          arn:
+            Fn::GetAtt:
+              - ExecutionQueue
+              - Arn
+          batchSize: 1
+
+  handleResultQueue:
+    handler: executionHandler.handleResultModel
+    role: arn:aws:iam::626150083436:role/LabRole
+    events:
+      - sqs:
+          arn:
+            Fn::GetAtt:
+              - ResultQueue
+              - Arn
+          batchSize: 1
+
+resources:
+  Resources:
+    ModelsTable:
+      Type: AWS::DynamoDB::Table
+      Properties:
+        AttributeDefinitions:
+          - AttributeName: id
+            AttributeType: S
+        KeySchema:
+          - AttributeName: id
+            KeyType: HASH
+        BillingMode: PAY_PER_REQUEST
+        TableName: ${self:custom.tableName}
+    
+    ExecutionsTable:
+      Type: AWS::DynamoDB::Table
+      Properties:
+        AttributeDefinitions:
+          - AttributeName: executionId
+            AttributeType: S
+        KeySchema:
+          - AttributeName: executionId
+            KeyType: HASH
+        BillingMode: PAY_PER_REQUEST
+        TableName: ${self:custom.executionsTableName}
+
+    MyS3Bucket:
+      Type: AWS::S3::Bucket
+      Properties:
+        BucketName: ${self:custom.s3BucketName}
+    
+    S3UserBucket:
+      Type: AWS::S3::Bucket
+      Properties:
+        BucketName: ${self:custom.s3UserImageBucketName}
+    
+    ClickstreamDataStream:
+      Type: AWS::Kinesis::Stream
+      Properties:
+        Name: clickstream
+        StreamModeDetails:
+          StreamMode: "ON_DEMAND"
+        
+    MyFirehoseStream:
+      Type: AWS::KinesisFirehose::DeliveryStream
+      Properties:
+        DeliveryStreamType: KinesisStreamAsSource
+        KinesisStreamSourceConfiguration:
+          KinesisStreamARN: !GetAtt ClickstreamDataStream.Arn
+          RoleARN: arn:aws:iam::626150083436:role/LabRole
+        S3DestinationConfiguration:
+          BucketARN: !GetAtt MyS3Bucket.Arn
+          RoleARN: arn:aws:iam::626150083436:role/LabRole
+          BufferingHints:
+            IntervalInSeconds: 60
+            SizeInMBs: 5
+          CompressionFormat: UNCOMPRESSED
+
+    CloudWatchLogsSubscriptionFilter:
+      Type: AWS::Logs::SubscriptionFilter
+      Properties:
+        RoleArn: arn:aws:iam::626150083436:role/LabRole
+        DestinationArn: !GetAtt ClickstreamDataStream.Arn
+        FilterPattern: "[ClickStream]"
+        LogGroupName: !Sub "/aws/lambda/${self:service}-${sls:stage}-api"
+
+    ExecutionQueue:
+      Type: AWS::SQS::Queue
+      Properties:
+        QueueName: ${self:custom.executionQueueName}
+        VisibilityTimeout: 30
+
+    ResultQueue:
+      Type: AWS::SQS::Queue
+      Properties:
+        QueueName: ${self:custom.resultQueueName}
+        VisibilityTimeout: 30

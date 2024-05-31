@@ -1,8 +1,0 @@
-{
-    "flows": [
-        {
-            "filePattern": "/home/ubuntu/logs/http-requests.log",
-            "kinesisStream": "clickstream"
-        }
-    ]
-}
